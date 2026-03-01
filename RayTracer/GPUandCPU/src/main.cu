@@ -6,14 +6,21 @@
 #include "scene.h"
 #include "camera.h"
 #include "query.h"
+#include "material.h"
+#include "texture.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
 
 #include <numeric>
 #include <chrono>
 #include <fstream>
 #include <cmath>
+#include <filesystem>
+
 
 #ifdef __CUDACC__
 __global__ void buildTrianglesKernel(const MeshView mesh, Triangle* out, int numTriangles) {
@@ -37,7 +44,21 @@ __global__ void buildTrianglesKernel(const MeshView mesh, Triangle* out, int num
         n2 = mesh.normals[i2];
     }
 
-    out[idx] = Triangle(v0, v1, v2, n0, n1, n2);
+    
+    Vec2 uv0 = make_vec2(0.0f, 0.0f);
+    Vec2 uv1 = make_vec2(0.0f, 0.0f);
+    Vec2 uv2 = make_vec2(0.0f, 0.0f);
+    if (mesh.uvs != nullptr) {
+        uv0 = mesh.uvs[i0];
+        uv1 = mesh.uvs[i1];
+        uv2 = mesh.uvs[i2];
+    }
+
+    Triangle tri = Triangle(v0, v1, v2, n0, n1, n2);
+    tri.uv0 = uv0;
+    tri.uv1 = uv1;
+    tri.uv2 = uv2;
+    out[idx] = tri;
 }
 
 #endif
@@ -93,6 +114,39 @@ static inline void applyObjectTransform(Mesh& mesh, const SceneObject& obj) {
             n = make_vec3(0.0f, 0.0f, 1.0f);
         }
     }
+}
+
+
+Texture* loadTexture(const std::string& path)
+{
+
+    static std::unordered_map<std::string, std::unique_ptr<Texture>> g_textureCache;
+    // 1. Check if texture is already in the cache.
+    auto it = g_textureCache.find(path);
+    if (it != g_textureCache.end()) {
+        return it->second.get();  // return existing Texture*
+    }
+
+    // 2. Not in cache: load from disk.
+    int w, h, n;
+    unsigned char* pixels = stbi_load(path.c_str(), &w, &h, &n, 0);
+    if (!pixels) {
+        std::fprintf(stderr, "Failed to load texture: %s\n", path.c_str());
+        return nullptr;
+    }
+
+    // 3. Create a new Texture object and fill it.
+    auto tex = std::make_unique<Texture>();
+    tex->width = w;
+    tex->height = h;
+    tex->channels = n;
+    tex->data.assign(pixels, pixels + (w * h * n));
+
+    stbi_image_free(pixels);
+
+    Texture* ptr = tex.get();
+    g_textureCache[path] = std::move(tex);
+    return ptr;
 }
 
 int main(int argc, char** argv)
@@ -165,8 +219,25 @@ int main(int argc, char** argv)
     std::vector<Material> objectMaterials;
     int nextObjectId = 0;
 
-    for (const auto& obj : load_objects)
+    for (auto& obj : load_objects)
     {
+                if (!obj.material.albedoMapPath.empty()) {
+            obj.material.albedo_map = loadTexture(obj.material.albedoMapPath);
+        } else {
+            obj.material.albedo_map = nullptr;
+        }
+
+        if (!obj.material.bumpMapPath.empty()) {
+            obj.material.bump_map = loadTexture(obj.material.bumpMapPath);
+        } else {
+            obj.material.bump_map = nullptr;
+        }
+
+        if (!obj.material.normalMapPath.empty()) {
+            obj.material.normal_map = loadTexture(obj.material.normalMapPath);
+        } else {
+            obj.material.normal_map = nullptr;
+        }
         const std::string& path = obj.path;
         std::printf("Loading OBJ: %s\n", path.c_str());
         Mesh tempMesh;
@@ -215,6 +286,7 @@ int main(int argc, char** argv)
 #ifdef __CUDACC__
     Vec3* d_positions = nullptr;
     Vec3* d_normals = nullptr;
+    Vec2* d_uvs = nullptr;
     uint32_t* d_indices = nullptr;
     int32_t* d_triangle_obj_ids = nullptr;
     Material* d_object_materials = nullptr;
@@ -222,6 +294,7 @@ int main(int argc, char** argv)
     const size_t bytesPos = globalMesh.positions.size() * sizeof(Vec3);
     const size_t bytesIdx = globalMesh.indices.size() * sizeof(uint32_t);
     const size_t bytesNrm = globalMesh.normals.size() * sizeof(Vec3);
+    const size_t bytesUV = globalMesh.uvs.size() * sizeof(Vec2);
     const size_t bytesTriObj = globalMesh.triangleObjIds.size() * sizeof(int32_t);
     const size_t bytesObjMat = objectMaterials.size() * sizeof(Material);
 
@@ -232,6 +305,9 @@ int main(int argc, char** argv)
     if (!globalMesh.normals.empty()) {
         CHECK_CUDA((cudaMalloc(&d_normals, bytesNrm)), true);
     }
+    if (!globalMesh.uvs.empty()) {
+        CHECK_CUDA((cudaMalloc(&d_uvs, bytesUV)), true);
+    }
 
     CHECK_CUDA((cudaMemcpy(d_positions, globalMesh.positions.data(), bytesPos, cudaMemcpyHostToDevice)), true);
     CHECK_CUDA((cudaMemcpy(d_indices, globalMesh.indices.data(), bytesIdx, cudaMemcpyHostToDevice)), true);
@@ -239,6 +315,9 @@ int main(int argc, char** argv)
     CHECK_CUDA((cudaMemcpy(d_object_materials, objectMaterials.data(), bytesObjMat, cudaMemcpyHostToDevice)), true);
     if (!globalMesh.normals.empty()) {
         CHECK_CUDA((cudaMemcpy(d_normals, globalMesh.normals.data(), bytesNrm, cudaMemcpyHostToDevice)), true);
+    }
+    if (!globalMesh.uvs.empty()) {
+        CHECK_CUDA((cudaMemcpy(d_uvs, globalMesh.uvs.data(), bytesUV, cudaMemcpyHostToDevice)), true);
     }
 
     MeshView d_mesh{};
@@ -304,6 +383,7 @@ int main(int argc, char** argv)
         std::vector<unsigned int> TriangleIndices(P);
         std::iota(TriangleIndices.begin(), TriangleIndices.end(), 0);
         auto start_cpu =  std::chrono::high_resolution_clock::now();
+        auto render_start_cpu =  std::chrono::high_resolution_clock::now();
         bvh.buildBVH(
             bvhState.Nodes,
             bvhState.AABBs,
@@ -382,6 +462,7 @@ int main(int argc, char** argv)
     cudaFree(d_positions);
     cudaFree(d_normals);
     cudaFree(d_indices);
+    cudaFree(d_uvs);
     cudaFree(d_triangle_obj_ids);
     cudaFree(d_object_materials);
 #else
@@ -400,7 +481,20 @@ int main(int argc, char** argv)
             n2 = globalMesh.normals[i2];
         }
 
-        h_tris[i] = Triangle(globalMesh.positions[i0], globalMesh.positions[i1], globalMesh.positions[i2], n0, n1, n2);
+        Vec2 uv0 = make_vec2(0.0f, 0.0f);
+        Vec2 uv1 = make_vec2(0.0f, 0.0f);
+        Vec2 uv2 = make_vec2(0.0f, 0.0f);
+        if (!globalMesh.uvs.empty()) {
+            uv0 = globalMesh.uvs[i0];
+            uv1 = globalMesh.uvs[i1];
+            uv2 = globalMesh.uvs[i2];
+        }
+
+        Triangle tri = Triangle(globalMesh.positions[i0], globalMesh.positions[i1], globalMesh.positions[i2], n0, n1, n2);
+        tri.uv0 = uv0;
+        tri.uv1 = uv1;
+        tri.uv2 = uv2;
+        h_tris[i] = tri;
     }
     auto start_render = std::chrono::high_resolution_clock::now();
     render(P, img_w, img_h, cam, miss_color, max_depth, spp, bvhState.Nodes, bvhState.AABBs, h_tris.data(),
@@ -432,5 +526,9 @@ int main(int argc, char** argv)
     stbi_write_png("render.png", img_w, img_h, 3, img_data.data(), img_w * 3);
     printf("Image saved to render.png\n");
 
+
+    auto render_end_cpu = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> render_time_cpu = render_end_cpu - render_start_cpu;
+    printf("CPU Render Time: %.3f ms\n", render_time_cpu.count());
     return 0;
 }

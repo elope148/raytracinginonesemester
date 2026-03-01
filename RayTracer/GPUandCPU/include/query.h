@@ -125,6 +125,46 @@ HYBRID_FUNC inline HitRecord intersectTriangle(const Ray& r,
         if (dot(shadingN, geomN) < 0.0f) shadingN = -shadingN;
     }
 
+    // -------------------- NEW: interpolate UVs --------------------
+
+
+    rec.u = (1.0f - u - v) * tri.uv0.x + u * tri.uv1.x + v * tri.uv2.x;
+    rec.v = (1.0f - u - v) * tri.uv0.y + u * tri.uv1.y + v * tri.uv2.y;
+
+    // -------------------- NEW: COMPUTE TANGENT + BITANGENT --------------------
+    Vec3 dp1 = e1;  // p1 - p0
+    Vec3 dp2 = e2;  // p2 - p0
+    
+    Vec2 duv1 = {tri.uv1.x - tri.uv0.x, tri.uv1.y - tri.uv0.y};
+    Vec2 duv2 = {tri.uv2.x - tri.uv0.x, tri.uv2.y - tri.uv0.y};
+    
+    float uv_det = duv1.x * duv2.y - duv2.x * duv1.y;
+    
+    if (fabsf(uv_det) > 1e-8f) {
+        float inv_uv_det = 1.0f / uv_det;
+        
+        // Tangent (U direction)
+        rec.tangent = normalize(
+            (duv2.y * dp1 - duv1.y * dp2) * inv_uv_det
+        );
+        
+        // Bitangent (V direction)  
+        rec.bitangent = normalize(
+            (duv1.x * dp2 - duv2.x * dp1) * inv_uv_det
+        );
+    } else {
+        // Fallback: arbitrary TBN frame
+        rec.tangent = unit_vector(cross(shadingN, Vec3{0,1,0}));
+        if (length_squared(rec.tangent) < 1e-8f) {
+            rec.tangent = unit_vector(cross(shadingN, Vec3{0,0,1}));
+        }
+        rec.bitangent = cross(shadingN, rec.tangent);
+    }
+
+    rec.tangent = normalize(rec.tangent - shadingN * dot(shadingN, rec.tangent));
+
+    rec.bitangent = normalize(cross(shadingN, rec.tangent));
+
     rec.normal = shadingN;
     rec.mat = Material();
 

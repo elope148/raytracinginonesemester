@@ -1,7 +1,11 @@
 #ifndef MATERIAL_H
 #define MATERIAL_H
 
+#include <memory>
+#include <string>
+#include <vector>
 #include "vec3.h"
+#include "texture.h"   // NEW;
 
 struct Material {
     // Diffuse (Lambert)
@@ -18,6 +22,16 @@ struct Material {
 
     // Emission (we will need to update this later, basic placeholder for now)
     Vec3  emission      = make_vec3(0.0f, 0.0f, 0.0f);
+
+
+    std::string albedoMapPath;
+    Texture* albedo_map = nullptr;
+
+    std::string bumpMapPath;
+    Texture* bump_map = nullptr;
+
+    std::string normalMapPath;
+    Texture* normal_map = nullptr;
 };
 
 #endif

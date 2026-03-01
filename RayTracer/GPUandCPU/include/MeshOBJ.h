@@ -19,6 +19,11 @@ struct Vec2 {
     Vec2(float _x, float _y) : x(_x), y(_y) {}
 };
 
+
+HYBRID_FUNC inline Vec2 make_vec2(float x, float y) {
+    return Vec2(x, y);
+}
+
 struct Mesh; // Forward decl
 
 // Lightweight structure for passing mesh data to CUDA kernels
@@ -47,23 +52,31 @@ struct Triangle {
     Vec3 n1;
     Vec3 n2;
 
+        // --- NEW: per-vertex UV coordinates ---
+    Vec2 uv0;
+    Vec2 uv1;
+    Vec2 uv2;
+
     HYBRID_FUNC Triangle()
         : v0(make_vec3(0.0f, 0.0f, 0.0f)),
           v1(make_vec3(0.0f, 0.0f, 0.0f)),
           v2(make_vec3(0.0f, 0.0f, 0.0f)),
           n0(make_vec3(0.0f, 0.0f, 0.0f)),
           n1(make_vec3(0.0f, 0.0f, 0.0f)),
-          n2(make_vec3(0.0f, 0.0f, 0.0f)) {}
+          n2(make_vec3(0.0f, 0.0f, 0.0f)),
+          uv0({0.0f,0.0f}), uv1({0.0f,0.0f}), uv2({0.0f,0.0f})  {}
 
     HYBRID_FUNC Triangle(const Vec3& a, const Vec3& b, const Vec3& c)
         : v0(a), v1(b), v2(c),
           n0(make_vec3(0.0f, 0.0f, 0.0f)),
           n1(make_vec3(0.0f, 0.0f, 0.0f)),
-          n2(make_vec3(0.0f, 0.0f, 0.0f)) {}
+          n2(make_vec3(0.0f, 0.0f, 0.0f)),
+          uv0({0.0f,0.0f}), uv1({0.0f,0.0f}), uv2({0.0f,0.0f}) {}
 
     HYBRID_FUNC Triangle(const Vec3& a, const Vec3& b, const Vec3& c,
                          const Vec3& na, const Vec3& nb, const Vec3& nc)
-        : v0(a), v1(b), v2(c), n0(na), n1(nb), n2(nc) {}
+        : v0(a), v1(b), v2(c), n0(na), n1(nb), n2(nc),
+        uv0({0.0f,0.0f}), uv1({0.0f,0.0f}), uv2({0.0f,0.0f}) {}
 };
 
 struct HitRecord {
@@ -73,7 +86,16 @@ struct HitRecord {
     Vec3 normal;
     double t; // parameter used to define point on ray direction of hit
     bool front_face;
+
+       // --- Texture coordinates (NEW) ---
+    float u = 0.0f;
+    float v = 0.0f;
+
     Material mat;
+
+
+    Vec3 tangent;
+    Vec3 bitangent;
 };
 
 struct MissRecord {

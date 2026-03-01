@@ -368,6 +368,15 @@ inline bool parse_scene(const JsonValue& root, Scene& scene, std::string* err) {
             if (json_get(*material, "kr", &v) && v->type == JsonValue::Type::Number) {
                 obj.material.kr = static_cast<float>(v->num);
             }
+            if (json_get(*material, "albedo_map", &v) && v->type == JsonValue::Type::String) {
+                obj.material.albedoMapPath = v->str;
+            }
+            if (json_get(*material, "bump_map", &v) && v->type == JsonValue::Type::String) {
+                obj.material.bumpMapPath = v->str;
+            }
+            if (json_get(*material, "normal_map", &v) && v->type == JsonValue::Type::String) {
+                obj.material.normalMapPath = v->str;
+            }
         }
         if (!obj.path.empty()) scene.objects.push_back(obj);
     }
