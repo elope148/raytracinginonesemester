@@ -463,6 +463,9 @@ int main(int argc, char** argv)
     const int num_lights = static_cast<int>(render_lights.size());
     const int num_object_materials = static_cast<int>(renderMaterials.size());
 
+    // Scene statistics (shared by CPU & GPU paths)
+    printf("Scene stats: %zu triangles, %d light(s)\n", P, num_lights);
+
     const int img_w = cam.pixel_width;
     const int img_h = cam.pixel_height;
     const int num_pixels = img_w * img_h;
