@@ -9,7 +9,7 @@ make -j8
 
 ## For GPU Build 
 mkdir build && cd build
-cmake -DENABLE_GPU=ON ..
+cmake -ENABLE_GPU=ON ..
 make -j8
 
 

@@ -6,7 +6,10 @@
 #include "vec3.h"
 #include "material.h"
 
+// FIX: wasn't able to compile due to duplicate saturate on GPU.
+#ifndef __CUDACC__
 HYBRID_FUNC inline float saturate(float x) { return (x < 0.f) ? 0.f : (x > 1.f ? 1.f : x); }
+#endif
 
 HYBRID_FUNC inline Vec3 sampleTexture(const TextureData* tex, Vec2 uv)
 {

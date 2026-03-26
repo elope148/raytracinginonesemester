@@ -28,7 +28,8 @@ if(ENABLE_GPU)
     target_compile_options(bvh_viz PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda;--expt-relaxed-constexpr;--use_fast_math>)
     
     # Ensure C++11 or higher (CUDA usually supports C++14/17 in recent versions)
-    set_target_properties(bvh_viz PROPERTIES CUDA_STANDARD 17)
+    # UPDATED TO 14 TO AVOID COMPATIBILITY ISSUES WITH OLDER CUDA VERSIONS 
+    set_target_properties(bvh_viz PROPERTIES CUDA_STANDARD 14)
 
 else()
     message(STATUS "Building for CPU (Default)")
