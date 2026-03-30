@@ -41,6 +41,17 @@ HYBRID_FUNC inline Vec3 reflect_dir(const Vec3& I, const Vec3& N) {
     return I - (2.0f * dot(I, N)) * N;
 }
 
+HYBRID_FUNC inline float GeometryTerm(const Vec3& hitPoint,
+                                      const Vec3& lightPoint,
+                                      const Vec3& lightNormal)
+{
+    Vec3 wi = lightPoint - hitPoint;
+    float r2 = dot(wi, wi);
+    if (r2 < 1e-10f) return 0.0f;
+    Vec3 wid = wi * (1.0f / sqrtf(r2));
+    return fabsf(dot(lightNormal, -wid)) / r2;
+}
+
 HYBRID_FUNC inline bool IsInShadow(const Vec3& P,
                        const Vec3& N,
                        const Light& light,
@@ -102,6 +113,27 @@ HYBRID_FUNC inline Vec3 computeBumpNormal(const Vec3& N, const Vec3& T, const Ve
     return normalize(T * bump.x + B * bump.y + N * bump.z);
 }
 
+HYBRID_FUNC inline Vec3 GetShadingNormal(const HitRecord& rec)
+{
+    const Vec3 N = unit_vector(rec.normal);
+    const Vec3 T = unit_vector(rec.tangent);
+    const Vec3 B = unit_vector(rec.bitangent);
+
+    if (rec.mat.normal_map) {
+        Vec3 mapN = sampleTexture(rec.mat.normal_map, {rec.u, rec.v});
+        mapN = make_vec3(mapN.x * 2.0f - 1.0f,
+                         mapN.y * 2.0f - 1.0f,
+                         mapN.z * 2.0f - 1.0f);
+        return normalize(T * mapN.x + B * mapN.y + N * mapN.z);
+    }
+
+    if (rec.mat.bump_map) {
+        return computeBumpNormal(N, T, B, rec.u, rec.v, rec.mat.bump_map, 100.0f);
+    }
+
+    return N;
+}
+
 
 HYBRID_FUNC inline Vec3 ShadeDirect(const Ray& r,
                         const HitRecord& rec,
@@ -118,21 +150,7 @@ HYBRID_FUNC inline Vec3 ShadeDirect(const Ray& r,
 
     Vec3 Lo = make_vec3(0,0,0);
 
-    // small ambient (looks nicer)
-    Vec3 ambient = rec.mat.albedo * 0.05f;
-    Lo = Lo + ambient;
-
-    // add emission (placeholder math for now)
-    Lo = Lo + rec.mat.emission;
-
-
-    Vec3 T = unit_vector(rec.tangent);
-    Vec3 B = unit_vector(rec.bitangent);
-
-    Vec3 Ns = N;
-    if (rec.mat.bump_map) {
-        Ns = computeBumpNormal(unit_vector(rec.normal), T, B, rec.u, rec.v, rec.mat.bump_map, 100.0f);
-    }
+    Vec3 Ns = GetShadingNormal(rec);
 
     for (int i = 0; i < numLights; ++i) {
         const Light& light = lights[i];

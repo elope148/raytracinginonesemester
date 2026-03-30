@@ -26,7 +26,12 @@ renderBatchCUDA(const int numTriangles,
        const Light* __restrict__ lights,
        const int numLights,
        const bool diffuse_bounce,
-       Vec3* __restrict__ output)
+       const EmissiveTriInfo* __restrict__ emissiveTris,
+       const float* __restrict__ emissiveCDF,
+       const int numEmissiveTris,
+       const float totalEmissiveArea,
+       Vec3* __restrict__ output,
+       const int nee_mode)
 {
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -55,8 +60,10 @@ renderBatchCUDA(const int numTriangles,
             nodes, aabbs, triangles,
             triObjectIds, objectMaterials, numObjectMaterials,
             lights, numLights,
+            emissiveTris, emissiveCDF, numEmissiveTris, totalEmissiveArea,
             rng,
-            diffuse_bounce
+            diffuse_bounce,
+            nee_mode
         );
         batch_accum = batch_accum + color;
     }
@@ -92,7 +99,12 @@ void render(
     const Light* __restrict__ lights,
     const int numLights,
     const bool diffuse_bounce,
-    Vec3* __restrict__ output)
+    const EmissiveTriInfo* __restrict__ emissiveTris,
+    const float* __restrict__ emissiveCDF,
+    const int numEmissiveTris,
+    const float totalEmissiveArea,
+    Vec3* __restrict__ output,
+    int nee_mode)
 {
 #ifdef __CUDACC__
     dim3 tile_grid((W + BLOCK_X - 1) / BLOCK_X, (H + BLOCK_Y - 1) / BLOCK_Y, 1);
@@ -119,7 +131,12 @@ void render(
             lights,
             numLights,
             diffuse_bounce,
-            output
+            emissiveTris,
+            emissiveCDF,
+            numEmissiveTris,
+            totalEmissiveArea,
+            output,
+            nee_mode
         );
     }
 
@@ -156,8 +173,10 @@ void render(
                     nodes, aabbs, triangles,
                     triObjectIds, objectMaterials, numObjectMaterials,
                     lights, numLights,
+                    emissiveTris, emissiveCDF, numEmissiveTris, totalEmissiveArea,
                     rng,
-                    diffuse_bounce
+                    diffuse_bounce,
+                    nee_mode
                 );
             }
             output[pix_id] = col/float(spp);

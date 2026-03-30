@@ -156,11 +156,34 @@ int main(int argc, char** argv)
     using vec3 = Vec3;
     using point3 = Vec3;
 
+    std::string output_filename = "render.png";
+    int nee_mode = 2;  // 0 = area only, 1 = brdf only, 2 = MIS
+    std::vector<char*> positional_args;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if ((arg == "--output" || arg == "-o") && i + 1 < argc) {
+            output_filename = argv[++i];
+        } else if (arg == "--nee-mode" && i + 1 < argc) {
+            std::string mode = argv[++i];
+            if (mode == "area") nee_mode = 0;
+            else if (mode == "brdf") nee_mode = 1;
+            else if (mode == "mis") nee_mode = 2;
+            else {
+                std::fprintf(stderr, "Unknown --nee-mode '%s'. Use: area, brdf, mis\n", mode.c_str());
+                return 1;
+            }
+        } else {
+            positional_args.push_back(argv[i]);
+        }
+    }
+    const char* nee_names[] = {"area", "brdf", "mis"};
+    std::printf("NEE mode: %s\n", nee_names[nee_mode]);
+
     std::vector<SceneObject> load_objects;
     Scene scene;
     bool has_scene = false;
-    if (argc >= 2) {
-        std::string first = argv[1];
+    if (!positional_args.empty()) {
+        std::string first = positional_args[0];
         const bool is_scene =
             (first.size() >= 5 && first.substr(first.size() - 5) == ".json") ||
             (first.size() >= 6 && first.substr(first.size() - 6) == ".scene");
@@ -177,21 +200,43 @@ int main(int argc, char** argv)
                 std::ifstream f(p);
                 return static_cast<bool>(f);
             };
+            auto normalize_path = [](const std::string& p) -> std::string {
+                return std::filesystem::path(p).lexically_normal().string();
+            };
+            auto strip_to_assets = [](std::string p) -> std::string {
+                while (p.rfind("./", 0) == 0) p = p.substr(2);
+                while (p.rfind("../", 0) == 0) p = p.substr(3);
+                const size_t assets_pos = p.find("assets/");
+                return (assets_pos != std::string::npos) ? p.substr(assets_pos) : p;
+            };
             auto resolve_scene_relative_path = [&](const std::string& in_path) -> std::string {
                 if (in_path.empty() || SceneIO::is_abs_path(in_path)) {
                     return in_path;
                 }
-                const std::string scene_relative = SceneIO::join_path(base_dir, in_path);
-                std::string project_relative = in_path;
-                if (project_relative.rfind("./", 0) == 0) {
-                    project_relative = project_relative.substr(2);
-                }
-                project_relative = SceneIO::join_path(project_dir, project_relative);
 
-                if (file_exists(scene_relative)) return scene_relative;
-                if (file_exists(in_path)) return in_path; // cwd-relative
-                if (file_exists(project_relative)) return project_relative;
-                return scene_relative; // keep best-effort path for diagnostics
+                std::vector<std::string> candidates;
+                candidates.push_back(normalize_path((std::filesystem::path(base_dir) / in_path).string()));
+                candidates.push_back(normalize_path((std::filesystem::path(project_dir) / in_path).string()));
+                candidates.push_back(normalize_path(in_path));
+
+                const std::string assets_relative = strip_to_assets(in_path);
+                const std::string project_assets_relative =
+                    normalize_path((std::filesystem::path(project_dir) / assets_relative).string());
+                bool already_listed = false;
+                for (const auto& candidate : candidates) {
+                    if (candidate == project_assets_relative) {
+                        already_listed = true;
+                        break;
+                    }
+                }
+                if (!already_listed) {
+                    candidates.push_back(project_assets_relative);
+                }
+
+                for (const auto& candidate : candidates) {
+                    if (file_exists(candidate)) return candidate;
+                }
+                return candidates.front();
             };
             for (const auto& obj : scene.objects) {
                 if (!obj.type.empty() && obj.type != "mesh") continue;
@@ -203,9 +248,9 @@ int main(int argc, char** argv)
                 load_objects.push_back(resolved);
             }
         } else {
-            for (int i = 1; i < argc; ++i) {
+            for (char* parg : positional_args) {
                 SceneObject obj;
-                obj.path = argv[i];
+                obj.path = parg;
                 load_objects.push_back(obj);
             }
         }
@@ -452,7 +497,56 @@ int main(int argc, char** argv)
     Vec3 miss_color = has_scene ? scene.miss_color : make_vec3(0.0f, 0.0f, 0.0f);
     Camera cam = has_scene ? scene.camera : Camera();
     std::vector<Light> render_lights = scene.lights;
-    if (render_lights.empty()) {
+    const int num_object_materials = static_cast<int>(renderMaterials.size());
+
+    std::vector<EmissiveTriInfo> h_emissiveTris;
+    std::vector<float> h_emissiveCDF;
+    float totalEmissiveArea = 0.0f;
+    for (size_t i = 0; i < P; ++i) {
+        const int objId = globalMesh.triangleObjIds[i];
+        if (objId < 0 || objId >= num_object_materials) continue;
+
+        const Vec3& em = renderMaterials[objId].emission;
+        if (em.x <= 0.0f && em.y <= 0.0f && em.z <= 0.0f) continue;
+
+        const uint32_t i0 = globalMesh.indices[i * 3 + 0];
+        const uint32_t i1 = globalMesh.indices[i * 3 + 1];
+        const uint32_t i2 = globalMesh.indices[i * 3 + 2];
+        const Vec3 e1 = globalMesh.positions[i1] - globalMesh.positions[i0];
+        const Vec3 e2 = globalMesh.positions[i2] - globalMesh.positions[i0];
+        const Vec3 cr = cross(e1, e2);
+        const float cr_len = sqrtf(dot(cr, cr));
+        const float tri_area = 0.5f * cr_len;
+        if (tri_area < 1e-12f) continue;
+
+        EmissiveTriInfo info;
+        info.triangleIdx = static_cast<int>(i);
+        info.emission = em;
+        info.area = tri_area;
+        info.normal = cr * (1.0f / cr_len);
+        h_emissiveTris.push_back(info);
+        totalEmissiveArea += tri_area;
+    }
+    h_emissiveCDF.resize(h_emissiveTris.size());
+    float cumulative = 0.0f;
+    for (size_t i = 0; i < h_emissiveTris.size(); ++i) {
+        cumulative += h_emissiveTris[i].area;
+        h_emissiveCDF[i] = cumulative / totalEmissiveArea;
+    }
+    if (!h_emissiveCDF.empty()) {
+        h_emissiveCDF.back() = 1.0f;
+    }
+    const int numEmissiveTris = static_cast<int>(h_emissiveTris.size());
+
+    {
+        std::vector<Light> point_lights;
+        point_lights.reserve(render_lights.size());
+        for (const auto& light : render_lights) {
+            if (light.type == 0) point_lights.push_back(light);
+        }
+        render_lights = std::move(point_lights);
+    }
+    if (render_lights.empty() && numEmissiveTris == 0) {
         Light fallback;
         fallback.position = make_vec3(-3.0f, 0.0f, 1.0f);
         fallback.color = make_vec3(1.0f, 1.0f, 1.0f);
@@ -461,10 +555,10 @@ int main(int argc, char** argv)
         printf("No lights in scene, using fallback light.\n");
     }
     const int num_lights = static_cast<int>(render_lights.size());
-    const int num_object_materials = static_cast<int>(renderMaterials.size());
 
     // Scene statistics (shared by CPU & GPU paths)
-    printf("Scene stats: %zu triangles, %d light(s)\n", P, num_lights);
+    printf("Scene stats: %zu triangles, %d point light(s), %d emissive triangle(s)\n",
+           P, num_lights, numEmissiveTris);
 
     const int img_w = cam.pixel_width;
     const int img_h = cam.pixel_height;
@@ -476,11 +570,24 @@ int main(int argc, char** argv)
     Triangle* d_tris = nullptr;
     Vec3* d_image = nullptr;
     Light* d_lights = nullptr;
+    EmissiveTriInfo* d_emissiveTris = nullptr;
+    float* d_emissiveCDF = nullptr;
 
     CHECK_CUDA((cudaMalloc(&d_tris, sizeof(Triangle) * P)), true);
     CHECK_CUDA((cudaMalloc(&d_image, sizeof(Vec3) * img_w * img_h)), true);
-    CHECK_CUDA((cudaMalloc(&d_lights, sizeof(Light) * num_lights)), true);
-    CHECK_CUDA((cudaMemcpy(d_lights, render_lights.data(), sizeof(Light) * num_lights, cudaMemcpyHostToDevice)), true);
+    if (num_lights > 0) {
+        CHECK_CUDA((cudaMalloc(&d_lights, sizeof(Light) * num_lights)), true);
+        CHECK_CUDA((cudaMemcpy(d_lights, render_lights.data(),
+                               sizeof(Light) * num_lights, cudaMemcpyHostToDevice)), true);
+    }
+    if (numEmissiveTris > 0) {
+        CHECK_CUDA((cudaMalloc(&d_emissiveTris, sizeof(EmissiveTriInfo) * numEmissiveTris)), true);
+        CHECK_CUDA((cudaMemcpy(d_emissiveTris, h_emissiveTris.data(),
+                               sizeof(EmissiveTriInfo) * numEmissiveTris, cudaMemcpyHostToDevice)), true);
+        CHECK_CUDA((cudaMalloc(&d_emissiveCDF, sizeof(float) * numEmissiveTris)), true);
+        CHECK_CUDA((cudaMemcpy(d_emissiveCDF, h_emissiveCDF.data(),
+                               sizeof(float) * numEmissiveTris, cudaMemcpyHostToDevice)), true);
+    }
 
     const int threads = 256;
     const int tri_blocks = (static_cast<int>(P) + threads - 1) / threads;
@@ -490,7 +597,9 @@ int main(int argc, char** argv)
     // Warm up with a tiny launch to pay first-launch/JIT cost without full-frame work.
     render(P, 1, 1, cam, miss_color, max_depth, 1, bvhState.Nodes, bvhState.AABBs, d_tris,
            d_triangle_obj_ids, d_object_materials, num_object_materials,
-           d_lights, num_lights, diffuse_bounce, d_image);
+           d_lights, num_lights, diffuse_bounce,
+           d_emissiveTris, d_emissiveCDF, numEmissiveTris, totalEmissiveArea,
+           d_image, nee_mode);
 
     // Zero image buffer before the real render (warmup wrote into it)
     CHECK_CUDA((cudaMemset(d_image, 0, sizeof(Vec3) * img_w * img_h)), true);
@@ -499,7 +608,9 @@ int main(int argc, char** argv)
     auto start_render = std::chrono::high_resolution_clock::now();
     render(P, img_w, img_h, cam, miss_color, max_depth, spp, bvhState.Nodes, bvhState.AABBs, d_tris,
            d_triangle_obj_ids, d_object_materials, num_object_materials,
-           d_lights, num_lights, diffuse_bounce, d_image);
+           d_lights, num_lights, diffuse_bounce,
+           d_emissiveTris, d_emissiveCDF, numEmissiveTris, totalEmissiveArea,
+           d_image, nee_mode);
     CHECK_CUDA((cudaMemcpy(image.data(), d_image, sizeof(Vec3) * img_w * img_h, cudaMemcpyDeviceToHost)), true);
 
     auto end_render = std::chrono::high_resolution_clock::now();
@@ -508,6 +619,8 @@ int main(int argc, char** argv)
     cudaFree(d_tris);
     cudaFree(d_image);
     cudaFree(d_lights);
+    cudaFree(d_emissiveTris);
+    cudaFree(d_emissiveCDF);
     cudaFree(d_positions);
     cudaFree(d_normals);
     cudaFree(d_indices);
@@ -554,7 +667,11 @@ int main(int argc, char** argv)
     auto start_render = std::chrono::high_resolution_clock::now();
     render(P, img_w, img_h, cam, miss_color, max_depth, spp, bvhState.Nodes, bvhState.AABBs, h_tris.data(),
            globalMesh.triangleObjIds.data(), renderMaterials.data(), num_object_materials,
-           render_lights.data(), num_lights, diffuse_bounce, image.data());
+           render_lights.data(), num_lights, diffuse_bounce,
+           h_emissiveTris.empty() ? nullptr : h_emissiveTris.data(),
+           h_emissiveCDF.empty() ? nullptr : h_emissiveCDF.data(),
+           numEmissiveTris, totalEmissiveArea,
+           image.data(), nee_mode);
     auto end_render = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double, std::milli> ms_render = end_render - start_render;
     printf("CPU Render Time: %.3f ms\n", ms_render.count());
@@ -578,8 +695,8 @@ int main(int argc, char** argv)
         img_data[i * 3 + 1] = static_cast<unsigned char>(255.0f * std::min(image[i].y, 1.0f));
         img_data[i * 3 + 2] = static_cast<unsigned char>(255.0f * std::min(image[i].z, 1.0f));
     }
-    stbi_write_png("render.png", img_w, img_h, 3, img_data.data(), img_w * 3);
-    printf("Image saved to render.png\n");
+    stbi_write_png(output_filename.c_str(), img_w, img_h, 3, img_data.data(), img_w * 3);
+    printf("Image saved to %s\n", output_filename.c_str());
 
 
     return 0;

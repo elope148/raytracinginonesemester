@@ -22,6 +22,12 @@ struct Light {
     Vec3 position = make_vec3(0.0f, 0.0f, 0.0f);
     Vec3 color = make_vec3(1.0f, 1.0f, 1.0f);
     int intensity = 1;
+    int type = 0;  // 0 = point, 1 = area
+    Vec3 edge_u = make_vec3(0.0f, 0.0f, 0.0f);
+    Vec3 edge_v = make_vec3(0.0f, 0.0f, 0.0f);
+    Vec3 emission = make_vec3(0.0f, 0.0f, 0.0f);
+    Vec3 light_normal = make_vec3(0.0f, 1.0f, 0.0f);
+    float area = 1.0f;
 };
 
 struct SceneObject {
@@ -301,33 +307,74 @@ inline bool parse_scene(const JsonValue& root, Scene& scene, std::string* err) {
         );
     }
 
+    auto parse_one_light = [](const JsonValue& item) -> Light {
+        Light lc;
+        const JsonValue* v = nullptr;
+        if (json_get(item, "position", &v)) json_as_vec3(*v, lc.position);
+        if (json_get(item, "color", &v)) json_as_vec3(*v, lc.color);
+        if (json_get(item, "intensity", &v) && v->type == JsonValue::Type::Number) {
+            lc.intensity = static_cast<int>(v->num);
+        }
+
+        const JsonValue* light_type = nullptr;
+        if (json_get(item, "light_type", &light_type) &&
+            light_type->type == JsonValue::Type::String &&
+            light_type->str == "area") {
+            lc.type = 1;
+            if (json_get(item, "emission", &v)) json_as_vec3(*v, lc.emission);
+
+            const JsonValue* edge_u = nullptr;
+            const JsonValue* edge_v = nullptr;
+            if (json_get(item, "edge_u", &edge_u) && json_get(item, "edge_v", &edge_v)) {
+                json_as_vec3(*edge_u, lc.edge_u);
+                json_as_vec3(*edge_v, lc.edge_v);
+            } else {
+                Vec3 normal = make_vec3(0.0f, -1.0f, 0.0f);
+                if (json_get(item, "normal", &v)) json_as_vec3(*v, normal);
+                float width = 1.0f;
+                float height = 1.0f;
+                if (json_get(item, "width", &v) && v->type == JsonValue::Type::Number) {
+                    width = static_cast<float>(v->num);
+                }
+                if (json_get(item, "height", &v) && v->type == JsonValue::Type::Number) {
+                    height = static_cast<float>(v->num);
+                }
+
+                Vec3 up = (fabsf(normal.z) < 0.9f) ? make_vec3(0.0f, 0.0f, 1.0f)
+                                                   : make_vec3(1.0f, 0.0f, 0.0f);
+                Vec3 tangent = cross(up, normal);
+                float tangent_len = sqrtf(dot(tangent, tangent));
+                tangent = (tangent_len > 1e-10f)
+                    ? tangent * (1.0f / tangent_len)
+                    : make_vec3(1.0f, 0.0f, 0.0f);
+                Vec3 bitangent = cross(normal, tangent);
+                lc.edge_u = tangent * (width * 0.5f);
+                lc.edge_v = bitangent * (height * 0.5f);
+            }
+
+            Vec3 area_cross = cross(lc.edge_u, lc.edge_v);
+            float area_cross_len = sqrtf(dot(area_cross, area_cross));
+            if (area_cross_len > 1e-10f) {
+                lc.light_normal = area_cross * (1.0f / area_cross_len);
+                lc.area = area_cross_len * 4.0f;
+            }
+        }
+        return lc;
+    };
+
     scene.lights.clear();
     const JsonValue* lights = nullptr;
     if (json_get(root, "lights", &lights) && lights->type == JsonValue::Type::Array) {
         for (const auto& item : lights->arr) {
             if (item.type != JsonValue::Type::Object) continue;
-            Light lc;
-            const JsonValue* v = nullptr;
-            if (json_get(item, "position", &v)) json_as_vec3(*v, lc.position);
-            if (json_get(item, "color", &v)) json_as_vec3(*v, lc.color);
-            if (json_get(item, "intensity", &v) && v->type == JsonValue::Type::Number) {
-                lc.intensity = static_cast<int>(v->num);
-            }
-            scene.lights.push_back(lc);
+            scene.lights.push_back(parse_one_light(item));
         }
     }
     // Backward compatibility: allow single "light": { ... } in scene json.
     if (scene.lights.empty()) {
         const JsonValue* light = nullptr;
         if (json_get(root, "light", &light) && light->type == JsonValue::Type::Object) {
-            Light lc;
-            const JsonValue* v = nullptr;
-            if (json_get(*light, "position", &v)) json_as_vec3(*v, lc.position);
-            if (json_get(*light, "color", &v)) json_as_vec3(*v, lc.color);
-            if (json_get(*light, "intensity", &v) && v->type == JsonValue::Type::Number) {
-                lc.intensity = static_cast<int>(v->num);
-            }
-            scene.lights.push_back(lc);
+            scene.lights.push_back(parse_one_light(*light));
         }
     }
 
