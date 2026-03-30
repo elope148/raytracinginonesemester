@@ -19,8 +19,21 @@
 #include <chrono>
 #include <fstream>
 #include <cmath>
-#include <filesystem>
 
+#ifdef __CUDACC__
+#include <optix.h>
+#include <optix_stubs.h>
+#include <optix_function_table_definition.h>
+
+#define OPTIX_CHECK(call)                                                         \
+    do {                                                                          \
+        OptixResult res = call;                                                   \
+        if (res != OPTIX_SUCCESS) {                                               \
+            std::fprintf(stderr, "OptiX error: %s at %s:%d\n",                    \
+                         optixGetErrorString(res), __FILE__, __LINE__);           \
+        }                                                                         \
+    } while (0)
+#endif
 
 #ifdef __CUDACC__
 __global__ void buildTrianglesKernel(const MeshView mesh, Triangle* out, int numTriangles) {
@@ -156,12 +169,15 @@ int main(int argc, char** argv)
     using vec3 = Vec3;
     using point3 = Vec3;
 
+    bool use_denoiser = false;
     std::string output_filename = "render.png";
     int nee_mode = 2;  // 0 = area only, 1 = brdf only, 2 = MIS
     std::vector<char*> positional_args;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if ((arg == "--output" || arg == "-o") && i + 1 < argc) {
+        if (arg == "--denoise" || arg == "-d") {
+            use_denoiser = true;
+        } else if ((arg == "--output" || arg == "-o") && i + 1 < argc) {
             output_filename = argv[++i];
         } else if (arg == "--nee-mode" && i + 1 < argc) {
             std::string mode = argv[++i];
@@ -178,6 +194,12 @@ int main(int argc, char** argv)
     }
     const char* nee_names[] = {"area", "brdf", "mis"};
     std::printf("NEE mode: %s\n", nee_names[nee_mode]);
+#ifndef __CUDACC__
+    if (use_denoiser) {
+        std::fprintf(stderr, "Warning: --denoise requires a GPU build with OptiX support; ignoring.\n");
+        use_denoiser = false;
+    }
+#endif
 
     std::vector<SceneObject> load_objects;
     Scene scene;
@@ -200,8 +222,57 @@ int main(int argc, char** argv)
                 std::ifstream f(p);
                 return static_cast<bool>(f);
             };
-            auto normalize_path = [](const std::string& p) -> std::string {
-                return std::filesystem::path(p).lexically_normal().string();
+            auto normalize_path = [](std::string p) -> std::string {
+                if (p.empty()) return p;
+                for (char& c : p) {
+                    if (c == '\\') c = '/';
+                }
+
+                std::string prefix;
+                bool is_absolute = false;
+                size_t start = 0;
+                if (p.size() >= 2 && std::isalpha(static_cast<unsigned char>(p[0])) && p[1] == ':') {
+                    prefix = p.substr(0, 2);
+                    start = 2;
+                    if (start < p.size() && p[start] == '/') {
+                        is_absolute = true;
+                        ++start;
+                    }
+                } else if (p[0] == '/') {
+                    is_absolute = true;
+                    start = 1;
+                }
+
+                std::vector<std::string> parts;
+                size_t i = start;
+                while (i <= p.size()) {
+                    const size_t slash = p.find('/', i);
+                    const size_t len = (slash == std::string::npos) ? (p.size() - i) : (slash - i);
+                    const std::string part = p.substr(i, len);
+                    if (!part.empty() && part != ".") {
+                        if (part == "..") {
+                            if (!parts.empty() && parts.back() != "..") {
+                                parts.pop_back();
+                            } else if (!is_absolute) {
+                                parts.push_back(part);
+                            }
+                        } else {
+                            parts.push_back(part);
+                        }
+                    }
+                    if (slash == std::string::npos) break;
+                    i = slash + 1;
+                }
+
+                std::string normalized = prefix;
+                if (is_absolute) normalized += "/";
+                for (size_t idx = 0; idx < parts.size(); ++idx) {
+                    if (idx > 0 || is_absolute || !prefix.empty()) normalized += (idx == 0 ? "" : "/");
+                    normalized += parts[idx];
+                }
+
+                if (normalized.empty()) return ".";
+                return normalized;
             };
             auto strip_to_assets = [](std::string p) -> std::string {
                 while (p.rfind("./", 0) == 0) p = p.substr(2);
@@ -215,13 +286,13 @@ int main(int argc, char** argv)
                 }
 
                 std::vector<std::string> candidates;
-                candidates.push_back(normalize_path((std::filesystem::path(base_dir) / in_path).string()));
-                candidates.push_back(normalize_path((std::filesystem::path(project_dir) / in_path).string()));
+                candidates.push_back(normalize_path(SceneIO::join_path(base_dir, in_path)));
+                candidates.push_back(normalize_path(SceneIO::join_path(project_dir, in_path)));
                 candidates.push_back(normalize_path(in_path));
 
                 const std::string assets_relative = strip_to_assets(in_path);
                 const std::string project_assets_relative =
-                    normalize_path((std::filesystem::path(project_dir) / assets_relative).string());
+                    normalize_path(SceneIO::join_path(project_dir, assets_relative));
                 bool already_listed = false;
                 for (const auto& candidate : candidates) {
                     if (candidate == project_assets_relative) {
@@ -572,6 +643,8 @@ int main(int argc, char** argv)
     Light* d_lights = nullptr;
     EmissiveTriInfo* d_emissiveTris = nullptr;
     float* d_emissiveCDF = nullptr;
+    Vec3* d_albedo_aov = nullptr;
+    Vec3* d_normal_aov = nullptr;
 
     CHECK_CUDA((cudaMalloc(&d_tris, sizeof(Triangle) * P)), true);
     CHECK_CUDA((cudaMalloc(&d_image, sizeof(Vec3) * img_w * img_h)), true);
@@ -588,6 +661,12 @@ int main(int argc, char** argv)
         CHECK_CUDA((cudaMemcpy(d_emissiveCDF, h_emissiveCDF.data(),
                                sizeof(float) * numEmissiveTris, cudaMemcpyHostToDevice)), true);
     }
+    if (use_denoiser) {
+        CHECK_CUDA((cudaMalloc(&d_albedo_aov, sizeof(Vec3) * img_w * img_h)), true);
+        CHECK_CUDA((cudaMalloc(&d_normal_aov, sizeof(Vec3) * img_w * img_h)), true);
+        CHECK_CUDA((cudaMemset(d_albedo_aov, 0, sizeof(Vec3) * img_w * img_h)), true);
+        CHECK_CUDA((cudaMemset(d_normal_aov, 0, sizeof(Vec3) * img_w * img_h)), true);
+    }
 
     const int threads = 256;
     const int tri_blocks = (static_cast<int>(P) + threads - 1) / threads;
@@ -599,10 +678,14 @@ int main(int argc, char** argv)
            d_triangle_obj_ids, d_object_materials, num_object_materials,
            d_lights, num_lights, diffuse_bounce,
            d_emissiveTris, d_emissiveCDF, numEmissiveTris, totalEmissiveArea,
-           d_image, nee_mode);
+           d_image, nullptr, nullptr, nee_mode);
 
     // Zero image buffer before the real render (warmup wrote into it)
     CHECK_CUDA((cudaMemset(d_image, 0, sizeof(Vec3) * img_w * img_h)), true);
+    if (use_denoiser) {
+        CHECK_CUDA((cudaMemset(d_albedo_aov, 0, sizeof(Vec3) * img_w * img_h)), true);
+        CHECK_CUDA((cudaMemset(d_normal_aov, 0, sizeof(Vec3) * img_w * img_h)), true);
+    }
 
     // clock results for render
     auto start_render = std::chrono::high_resolution_clock::now();
@@ -610,14 +693,116 @@ int main(int argc, char** argv)
            d_triangle_obj_ids, d_object_materials, num_object_materials,
            d_lights, num_lights, diffuse_bounce,
            d_emissiveTris, d_emissiveCDF, numEmissiveTris, totalEmissiveArea,
-           d_image, nee_mode);
-    CHECK_CUDA((cudaMemcpy(image.data(), d_image, sizeof(Vec3) * img_w * img_h, cudaMemcpyDeviceToHost)), true);
+           d_image, d_albedo_aov, d_normal_aov, nee_mode);
 
     auto end_render = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double, std::milli> ms_render = end_render - start_render;
     printf("GPU Render Time: %.3f ms\n", ms_render.count());
+
+    if (use_denoiser) {
+        auto start_denoise = std::chrono::high_resolution_clock::now();
+
+        OPTIX_CHECK(optixInit());
+
+        CUcontext cuCtx = nullptr;
+        OptixDeviceContext optixCtx = nullptr;
+        OPTIX_CHECK(optixDeviceContextCreate(cuCtx, nullptr, &optixCtx));
+
+        OptixDenoiserOptions denoiserOptions = {};
+        denoiserOptions.guideAlbedo = 1;
+        denoiserOptions.guideNormal = 1;
+        denoiserOptions.denoiseAlpha = OPTIX_DENOISER_ALPHA_MODE_COPY;
+
+        OptixDenoiser denoiser = nullptr;
+        OPTIX_CHECK(optixDenoiserCreate(optixCtx, OPTIX_DENOISER_MODEL_KIND_HDR,
+                                        &denoiserOptions, &denoiser));
+
+        OptixDenoiserSizes denoiserSizes = {};
+        OPTIX_CHECK(optixDenoiserComputeMemoryResources(denoiser,
+                        static_cast<unsigned int>(img_w),
+                        static_cast<unsigned int>(img_h),
+                        &denoiserSizes));
+
+        CUdeviceptr d_denoiserState = 0;
+        CUdeviceptr d_denoiserScratch = 0;
+        CHECK_CUDA((cudaMalloc(reinterpret_cast<void**>(&d_denoiserState),
+                               denoiserSizes.stateSizeInBytes)), true);
+        CHECK_CUDA((cudaMalloc(reinterpret_cast<void**>(&d_denoiserScratch),
+                               denoiserSizes.withoutOverlapScratchSizeInBytes)), true);
+
+        OPTIX_CHECK(optixDenoiserSetup(denoiser, nullptr,
+                        static_cast<unsigned int>(img_w),
+                        static_cast<unsigned int>(img_h),
+                        d_denoiserState,   denoiserSizes.stateSizeInBytes,
+                        d_denoiserScratch, denoiserSizes.withoutOverlapScratchSizeInBytes));
+
+        CUdeviceptr d_hdrIntensity = 0;
+        CHECK_CUDA((cudaMalloc(reinterpret_cast<void**>(&d_hdrIntensity), sizeof(float))), true);
+
+        CUdeviceptr d_intensityScratch = 0;
+        CHECK_CUDA((cudaMalloc(reinterpret_cast<void**>(&d_intensityScratch),
+                               denoiserSizes.computeIntensitySizeInBytes)), true);
+
+        auto makeImage2D = [&](CUdeviceptr ptr) -> OptixImage2D {
+            OptixImage2D img = {};
+            img.data               = ptr;
+            img.width              = static_cast<unsigned int>(img_w);
+            img.height             = static_cast<unsigned int>(img_h);
+            img.rowStrideInBytes   = static_cast<unsigned int>(img_w * sizeof(Vec3));
+            img.pixelStrideInBytes = static_cast<unsigned int>(sizeof(Vec3));
+            img.format             = OPTIX_PIXEL_FORMAT_FLOAT3;
+            return img;
+        };
+
+        OptixImage2D colorImg  = makeImage2D(reinterpret_cast<CUdeviceptr>(d_image));
+        OptixImage2D albedoImg = makeImage2D(reinterpret_cast<CUdeviceptr>(d_albedo_aov));
+        OptixImage2D normalImg = makeImage2D(reinterpret_cast<CUdeviceptr>(d_normal_aov));
+
+        OPTIX_CHECK(optixDenoiserComputeIntensity(denoiser, nullptr,
+                        &colorImg, d_hdrIntensity,
+                        d_intensityScratch, denoiserSizes.computeIntensitySizeInBytes));
+
+        OptixImage2D outputImg = colorImg;
+
+        OptixDenoiserGuideLayer guideLayer = {};
+        guideLayer.albedo = albedoImg;
+        guideLayer.normal = normalImg;
+
+        OptixDenoiserLayer layer = {};
+        layer.input  = colorImg;
+        layer.output = outputImg;
+
+        OptixDenoiserParams params = {};
+        params.hdrIntensity  = d_hdrIntensity;
+        params.blendFactor   = 0.0f;
+        params.hdrAverageColor = 0;
+        params.temporalModeUsePreviousLayers = 0;
+
+        OPTIX_CHECK(optixDenoiserInvoke(denoiser, nullptr, &params,
+                        d_denoiserState, denoiserSizes.stateSizeInBytes,
+                        &guideLayer, &layer, 1,
+                        0, 0,
+                        d_denoiserScratch, denoiserSizes.withoutOverlapScratchSizeInBytes));
+
+        CHECK_CUDA((cudaDeviceSynchronize()), true);
+
+        auto end_denoise = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double, std::milli> ms_denoise = end_denoise - start_denoise;
+        printf("OptiX Denoise Time: %.3f ms\n", ms_denoise.count());
+
+        cudaFree(reinterpret_cast<void*>(d_denoiserState));
+        cudaFree(reinterpret_cast<void*>(d_denoiserScratch));
+        cudaFree(reinterpret_cast<void*>(d_hdrIntensity));
+        cudaFree(reinterpret_cast<void*>(d_intensityScratch));
+        optixDenoiserDestroy(denoiser);
+        optixDeviceContextDestroy(optixCtx);
+    }
+
+    CHECK_CUDA((cudaMemcpy(image.data(), d_image, sizeof(Vec3) * img_w * img_h, cudaMemcpyDeviceToHost)), true);
     cudaFree(d_tris);
     cudaFree(d_image);
+    if (d_albedo_aov) cudaFree(d_albedo_aov);
+    if (d_normal_aov) cudaFree(d_normal_aov);
     cudaFree(d_lights);
     cudaFree(d_emissiveTris);
     cudaFree(d_emissiveCDF);
@@ -671,7 +856,7 @@ int main(int argc, char** argv)
            h_emissiveTris.empty() ? nullptr : h_emissiveTris.data(),
            h_emissiveCDF.empty() ? nullptr : h_emissiveCDF.data(),
            numEmissiveTris, totalEmissiveArea,
-           image.data(), nee_mode);
+           image.data(), nullptr, nullptr, nee_mode);
     auto end_render = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double, std::milli> ms_render = end_render - start_render;
     printf("CPU Render Time: %.3f ms\n", ms_render.count());
@@ -689,11 +874,16 @@ int main(int argc, char** argv)
 //     ExportAABBsToOBJ("bvh_.obj", allAABBs.data(), totalNodes);
 
     // write image to disk
+    auto reinhard = [](float c) -> unsigned char {
+        float mapped = c / (1.0f + c);
+        mapped = powf(fmaxf(mapped, 0.0f), 1.0f / 2.2f);
+        return static_cast<unsigned char>(255.0f * fminf(mapped, 1.0f));
+    };
     std::vector<unsigned char> img_data(num_pixels * 3);
     for (size_t i = 0; i < num_pixels; ++i)    {
-        img_data[i * 3 + 0] = static_cast<unsigned char>(255.0f * std::min(image[i].x, 1.0f));
-        img_data[i * 3 + 1] = static_cast<unsigned char>(255.0f * std::min(image[i].y, 1.0f));
-        img_data[i * 3 + 2] = static_cast<unsigned char>(255.0f * std::min(image[i].z, 1.0f));
+        img_data[i * 3 + 0] = reinhard(image[i].x);
+        img_data[i * 3 + 1] = reinhard(image[i].y);
+        img_data[i * 3 + 2] = reinhard(image[i].z);
     }
     stbi_write_png(output_filename.c_str(), img_w, img_h, 3, img_data.data(), img_w * 3);
     printf("Image saved to %s\n", output_filename.c_str());

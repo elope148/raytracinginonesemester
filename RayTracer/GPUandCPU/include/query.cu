@@ -31,6 +31,8 @@ renderBatchCUDA(const int numTriangles,
        const int numEmissiveTris,
        const float totalEmissiveArea,
        Vec3* __restrict__ output,
+       Vec3* __restrict__ albedo_aov,
+       Vec3* __restrict__ normal_aov,
        const int nee_mode)
 {
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -66,6 +68,24 @@ renderBatchCUDA(const int numTriangles,
             nee_mode
         );
         batch_accum = batch_accum + color;
+
+        if (s == 0 && albedo_aov != nullptr && normal_aov != nullptr) {
+            HitRecord aovHit;
+            SearchBVH(numTriangles, ray, nodes, aabbs, triangles, aovHit);
+            if (aovHit.hit) {
+                assignMaterialToHit(aovHit, numTriangles, triObjectIds,
+                                    objectMaterials, numObjectMaterials);
+                Vec3 albedo = aovHit.mat.albedo;
+                if (aovHit.mat.albedo_map != nullptr) {
+                    albedo = albedo * sampleTexture(aovHit.mat.albedo_map, {aovHit.u, aovHit.v});
+                }
+                albedo_aov[pix_id] = albedo;
+                normal_aov[pix_id] = normalize(GetShadingNormal(aovHit));
+            } else {
+                albedo_aov[pix_id] = missColor;
+                normal_aov[pix_id] = make_vec3(0.0f, 0.0f, 0.0f);
+            }
+        }
     }
 
     // Single read-modify-write per batch instead of per sample
@@ -104,6 +124,8 @@ void render(
     const int numEmissiveTris,
     const float totalEmissiveArea,
     Vec3* __restrict__ output,
+    Vec3* __restrict__ albedo_aov,
+    Vec3* __restrict__ normal_aov,
     int nee_mode)
 {
 #ifdef __CUDACC__
@@ -136,6 +158,8 @@ void render(
             numEmissiveTris,
             totalEmissiveArea,
             output,
+            albedo_aov,
+            normal_aov,
             nee_mode
         );
     }
@@ -178,6 +202,24 @@ void render(
                     diffuse_bounce,
                     nee_mode
                 );
+
+                if (si == 0 && albedo_aov != nullptr && normal_aov != nullptr) {
+                    HitRecord aovHit;
+                    SearchBVH(triCount, ray, nodes, aabbs, triangles, aovHit);
+                    if (aovHit.hit) {
+                        assignMaterialToHit(aovHit, triCount, triObjectIds,
+                                            objectMaterials, numObjectMaterials);
+                        Vec3 albedo = aovHit.mat.albedo;
+                        if (aovHit.mat.albedo_map != nullptr) {
+                            albedo = albedo * sampleTexture(aovHit.mat.albedo_map, {aovHit.u, aovHit.v});
+                        }
+                        albedo_aov[pix_id] = albedo;
+                        normal_aov[pix_id] = normalize(GetShadingNormal(aovHit));
+                    } else {
+                        albedo_aov[pix_id] = missColor;
+                        normal_aov[pix_id] = make_vec3(0.0f, 0.0f, 0.0f);
+                    }
+                }
             }
             output[pix_id] = col/float(spp);
         }

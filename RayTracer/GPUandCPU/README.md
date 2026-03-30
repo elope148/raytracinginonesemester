@@ -30,15 +30,15 @@ make -j8
 ## For GPU Build
 
 ```bash
-mkdir build && cd build
-cmake -DENABLE_GPU=ON ..
+mkdir build && cd build 
+cmake -DENABLE_GPU=ON -DCMAKE_CUDA_COMPILER=/usr/local/cuda-11.8/bin/nvcc -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/gcc-11 .. 
 make -j8
 ```
 
 ## Example Run
 
 ```bash
-./bvh_viz assets/json_files/sphere_single.json --nee-mode mis -o sphere_single.png
+./render ../assets/json_files/sphere_single.json --nee-mode mis -o sphere_single.png
 ```
 
 `--nee-mode` options:

@@ -31,6 +31,8 @@ void render(
     const int numEmissiveTris,
     const float totalEmissiveArea,
     Vec3* __restrict__ output,
+    Vec3* __restrict__ albedo_aov = nullptr,
+    Vec3* __restrict__ normal_aov = nullptr,
     int nee_mode = 2);
 
 
