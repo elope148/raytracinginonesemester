@@ -7,12 +7,12 @@
     "miss_color": [0.53, 0.81, 0.98],
 
     "camera": {
-        "focal_length_mm": 35.0,
+        "focal_length_mm": 50.0,
         "sensor_height_mm": 24.0,
         "pixel_width": 1920,
         "pixel_height": 1080,
-        "position": [0.0, -3.0, 1.5],
-        "look_at": [0.0, 0.0, 0.2],
+        "position": [0.0, -1.2, 0.6],
+        "look_at": [0.0, 0.0, 0.1],
         "up": [0.0, 0.0, 1.0]
     },
 

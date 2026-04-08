@@ -44,113 +44,21 @@
                 "uv_scale": 8.0
             }
         },
-
         {
-            "name": "billboard_0_0",
+            "name": "grass_billboards",
             "type": "mesh",
-            "path": "./assets/meshes/quad_billboard.obj",
-            "transform": { "position": [-1.2, -0.8, 0.0], "rotation": [0.0, 0.0,  15.0], "scale": [0.35, 0.35, 0.55] },
+            "path": "./assets/meshes/grass_billboards.obj",
+            "use_mtl": false,
+            "transform": {
+                "position": [0.0, 0.0, 0.0],
+                "rotation": [0.0, 0.0, 0.0],
+                "scale": [1.0, 1.0, 1.0]
+            },
             "material": {
                 "albedo": [0.3, 0.6, 0.2],
-                "kd": 1.0, "ks": 0.0, "kr": 0.0,
-                "diffuse_texture": "./assets/grass/bermuda/grass_bermuda_01_diff_4k.jpg",
-                "alpha_texture":   "./assets/grass/bermuda/grass_bermuda_01_alpha_4k.png"
-            }
-        },
-        {
-            "name": "billboard_0_1",
-            "type": "mesh",
-            "path": "./assets/meshes/quad_billboard.obj",
-            "transform": { "position": [ 0.0, -0.9, 0.0], "rotation": [0.0, 0.0, -10.0], "scale": [0.35, 0.35, 0.52] },
-            "material": {
-                "albedo": [0.3, 0.6, 0.2],
-                "kd": 1.0, "ks": 0.0, "kr": 0.0,
-                "diffuse_texture": "./assets/grass/bermuda/grass_bermuda_01_diff_4k.jpg",
-                "alpha_texture":   "./assets/grass/bermuda/grass_bermuda_01_alpha_4k.png"
-            }
-        },
-        {
-            "name": "billboard_0_2",
-            "type": "mesh",
-            "path": "./assets/meshes/quad_billboard.obj",
-            "transform": { "position": [ 1.2, -0.8, 0.0], "rotation": [0.0, 0.0,   5.0], "scale": [0.35, 0.35, 0.58] },
-            "material": {
-                "albedo": [0.3, 0.6, 0.2],
-                "kd": 1.0, "ks": 0.0, "kr": 0.0,
-                "diffuse_texture": "./assets/grass/bermuda/grass_bermuda_01_diff_4k.jpg",
-                "alpha_texture":   "./assets/grass/bermuda/grass_bermuda_01_alpha_4k.png"
-            }
-        },
-
-        {
-            "name": "billboard_1_0",
-            "type": "mesh",
-            "path": "./assets/meshes/quad_billboard.obj",
-            "transform": { "position": [-1.1,  0.1, 0.0], "rotation": [0.0, 0.0, -20.0], "scale": [0.35, 0.35, 0.50] },
-            "material": {
-                "albedo": [0.3, 0.6, 0.2],
-                "kd": 1.0, "ks": 0.0, "kr": 0.0,
-                "diffuse_texture": "./assets/grass/bermuda/grass_bermuda_01_diff_4k.jpg",
-                "alpha_texture":   "./assets/grass/bermuda/grass_bermuda_01_alpha_4k.png"
-            }
-        },
-        {
-            "name": "billboard_1_1",
-            "type": "mesh",
-            "path": "./assets/meshes/quad_billboard.obj",
-            "transform": { "position": [ 0.1,  0.0, 0.0], "rotation": [0.0, 0.0,  10.0], "scale": [0.35, 0.35, 0.54] },
-            "material": {
-                "albedo": [0.3, 0.6, 0.2],
-                "kd": 1.0, "ks": 0.0, "kr": 0.0,
-                "diffuse_texture": "./assets/grass/bermuda/grass_bermuda_01_diff_4k.jpg",
-                "alpha_texture":   "./assets/grass/bermuda/grass_bermuda_01_alpha_4k.png"
-            }
-        },
-        {
-            "name": "billboard_1_2",
-            "type": "mesh",
-            "path": "./assets/meshes/quad_billboard.obj",
-            "transform": { "position": [ 1.1,  0.1, 0.0], "rotation": [0.0, 0.0, -15.0], "scale": [0.35, 0.35, 0.56] },
-            "material": {
-                "albedo": [0.3, 0.6, 0.2],
-                "kd": 1.0, "ks": 0.0, "kr": 0.0,
-                "diffuse_texture": "./assets/grass/bermuda/grass_bermuda_01_diff_4k.jpg",
-                "alpha_texture":   "./assets/grass/bermuda/grass_bermuda_01_alpha_4k.png"
-            }
-        },
-
-        {
-            "name": "billboard_2_0",
-            "type": "mesh",
-            "path": "./assets/meshes/quad_billboard.obj",
-            "transform": { "position": [-1.2,  1.0, 0.0], "rotation": [0.0, 0.0,   8.0], "scale": [0.35, 0.35, 0.53] },
-            "material": {
-                "albedo": [0.3, 0.6, 0.2],
-                "kd": 1.0, "ks": 0.0, "kr": 0.0,
-                "diffuse_texture": "./assets/grass/bermuda/grass_bermuda_01_diff_4k.jpg",
-                "alpha_texture":   "./assets/grass/bermuda/grass_bermuda_01_alpha_4k.png"
-            }
-        },
-        {
-            "name": "billboard_2_1",
-            "type": "mesh",
-            "path": "./assets/meshes/quad_billboard.obj",
-            "transform": { "position": [ 0.0,  0.9, 0.0], "rotation": [0.0, 0.0, -12.0], "scale": [0.35, 0.35, 0.57] },
-            "material": {
-                "albedo": [0.3, 0.6, 0.2],
-                "kd": 1.0, "ks": 0.0, "kr": 0.0,
-                "diffuse_texture": "./assets/grass/bermuda/grass_bermuda_01_diff_4k.jpg",
-                "alpha_texture":   "./assets/grass/bermuda/grass_bermuda_01_alpha_4k.png"
-            }
-        },
-        {
-            "name": "billboard_2_2",
-            "type": "mesh",
-            "path": "./assets/meshes/quad_billboard.obj",
-            "transform": { "position": [ 1.2,  1.0, 0.0], "rotation": [0.0, 0.0,  18.0], "scale": [0.35, 0.35, 0.51] },
-            "material": {
-                "albedo": [0.3, 0.6, 0.2],
-                "kd": 1.0, "ks": 0.0, "kr": 0.0,
+                "kd": 1.0,
+                "ks": 0.0,
+                "kr": 0.0,
                 "diffuse_texture": "./assets/grass/bermuda/grass_bermuda_01_diff_4k.jpg",
                 "alpha_texture":   "./assets/grass/bermuda/grass_bermuda_01_alpha_4k.png"
             }
