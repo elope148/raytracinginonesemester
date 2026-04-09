@@ -36,12 +36,12 @@
                 "scale": [1.0, 1.0, 1.0]
             },
             "material": {
-                "albedo": [0.4, 0.6, 0.3],
+                "albedo": [0.6, 0.45, 0.3],
                 "kd": 1.0,
                 "ks": 0.0,
                 "kr": 0.0,
                 "diffuse_texture": "./assets/grass/grass_pic/grass_texture.jpg",
-                "uv_scale": 8.0
+                "uv_scale": 4.0
             }
         }
     ]
