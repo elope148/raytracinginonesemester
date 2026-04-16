@@ -133,6 +133,7 @@ struct Scene {
     SceneSettings settings;
     Camera camera;
     Vec3 miss_color = make_vec3(0.0f, 0.0f, 0.0f);
+    std::string sky_hdri_path;   // optional equirectangular HDR sky map
     std::vector<Light> lights;
     std::vector<SceneObject> objects;
     std::vector<VolumeRegion> volumes;  // NEW: spatial volume regions
@@ -482,6 +483,12 @@ inline bool parse_scene(const JsonValue& root, Scene& scene, std::string* err) {
     const JsonValue* miss_color = nullptr;
     if (json_get(root, "miss_color", &miss_color)) {
         json_as_vec3(*miss_color, scene.miss_color);
+    }
+
+    const JsonValue* sky_hdri = nullptr;
+    if (json_get(root, "sky_hdri", &sky_hdri) &&
+        sky_hdri->type == JsonValue::Type::String) {
+        scene.sky_hdri_path = sky_hdri->str;
     }
 
     const JsonValue* camera = nullptr;
