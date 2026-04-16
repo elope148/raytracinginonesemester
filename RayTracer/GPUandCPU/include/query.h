@@ -26,7 +26,14 @@ void render(
     const Light* __restrict__ lights,
     const int numLights,
     const bool diffuse_bounce,
-    Vec3* __restrict__ output);
+    const EmissiveTriInfo* __restrict__ emissiveTris,
+    const float* __restrict__ emissiveCDF,
+    const int numEmissiveTris,
+    const float totalEmissiveArea,
+    Vec3* __restrict__ output,
+    Vec3* __restrict__ albedo_aov = nullptr,
+    Vec3* __restrict__ normal_aov = nullptr,
+    int nee_mode = 2);
 
 
 HYBRID_FUNC inline float rng_next(unsigned int& state) {
@@ -67,6 +74,107 @@ HYBRID_FUNC inline Vec3 random_on_hemisphere(const Vec3& normal, unsigned int& s
     if (dot(on_unit_sphere, normal) > 0.0f)
         return on_unit_sphere;
     return make_vec3(-on_unit_sphere.x, -on_unit_sphere.y, -on_unit_sphere.z);
+}
+
+HYBRID_FUNC inline float path_luminance(const Vec3& c) {
+    return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
+}
+
+HYBRID_FUNC inline void build_onb(const Vec3& N, Vec3& tangent, Vec3& bitangent) {
+    Vec3 up = (fabsf(N.z) < 0.9f) ? make_vec3(0.0f, 0.0f, 1.0f)
+                                  : make_vec3(1.0f, 0.0f, 0.0f);
+    Vec3 cr = cross(up, N);
+    float len = sqrtf(dot(cr, cr));
+    tangent = (len > 1e-10f) ? cr * (1.0f / len) : make_vec3(1.0f, 0.0f, 0.0f);
+    bitangent = cross(N, tangent);
+}
+
+HYBRID_FUNC inline Vec3 cosine_hemisphere_sample(const Vec3& N, unsigned int& rng_state) {
+    const float u1 = rng_next(rng_state);
+    const float u2 = rng_next(rng_state);
+    const float r = sqrtf(u1);
+    const float phi = 6.28318530717958647692f * u2;
+    const float x = r * cosf(phi);
+    const float y = r * sinf(phi);
+    const float z = sqrtf(fmaxf(0.0f, 1.0f - u1));
+
+    Vec3 tangent, bitangent;
+    build_onb(N, tangent, bitangent);
+    Vec3 wi = tangent * x + bitangent * y + N * z;
+    float wi_len = sqrtf(dot(wi, wi));
+    return (wi_len > 1e-10f) ? wi * (1.0f / wi_len) : N;
+}
+
+HYBRID_FUNC inline float BRDFSamplingPdf(const HitRecord& rec,
+                                         const Vec3& wo,
+                                         const Vec3& wi,
+                                         const Vec3& Nshading,
+                                         bool allow_diffuse = true)
+{
+    if (!allow_diffuse && rec.mat.ks <= 0.0f) return 0.0f;
+    return allow_diffuse
+         ? BRDFpdf(rec, wo, wi, Nshading)
+         : BlinnPhongSpecularPDF(normalize(Nshading), wo, wi, rec.mat.shininess);
+}
+
+HYBRID_FUNC inline Vec3 sample_blinn_phong(const Vec3& N,
+                                           const Vec3& V,
+                                           float shininess,
+                                           unsigned int& rng_state,
+                                           float& pdf)
+{
+    const float u1 = rng_next(rng_state);
+    const float u2 = rng_next(rng_state);
+    const float twoPi = 6.28318530717958647692f;
+
+    const float cos_theta_H = powf(fmaxf(u1, 1e-10f), 1.0f / (shininess + 2.0f));
+    const float sin_theta_H = sqrtf(fmaxf(0.0f, 1.0f - cos_theta_H * cos_theta_H));
+    const float phi = twoPi * u2;
+
+    Vec3 tangent, bitangent;
+    build_onb(N, tangent, bitangent);
+
+    Vec3 H_raw = tangent * (sin_theta_H * cosf(phi))
+               + bitangent * (sin_theta_H * sinf(phi))
+               + N * cos_theta_H;
+    float h_len = sqrtf(dot(H_raw, H_raw));
+    Vec3 H = (h_len > 1e-10f) ? H_raw * (1.0f / h_len) : N;
+
+    const float VdotH = fmaxf(dot(V, H), 0.0f);
+    Vec3 wi_raw = H * (2.0f * VdotH) - V;
+    float wi_len = sqrtf(dot(wi_raw, wi_raw));
+    Vec3 wi = (wi_len > 1e-10f) ? wi_raw * (1.0f / wi_len) : N;
+
+    pdf = BlinnPhongSpecularPDF(N, V, wi, shininess);
+    return wi;
+}
+
+HYBRID_FUNC inline Vec3 SampleBRDF(const HitRecord& rec,
+                                   const Vec3& Vo,
+                                   const Vec3& Nshading,
+                                   unsigned int& rng_state,
+                                   float& out_pdf,
+                                   bool allow_diffuse = true)
+{
+    const Vec3 N = normalize(Nshading);
+    const float kd = allow_diffuse ? rec.mat.kd : 0.0f;
+    const float ks = rec.mat.ks;
+    const float total = kd + ks;
+    if (total <= 0.0f) {
+        out_pdf = 0.0f;
+        return make_vec3(0.0f, 0.0f, 0.0f);
+    }
+
+    Vec3 wi;
+    if (kd > 0.0f && rng_next(rng_state) < kd / total) {
+        wi = cosine_hemisphere_sample(N, rng_state);
+    } else {
+        float dummy_pdf = 0.0f;
+        wi = sample_blinn_phong(N, Vo, rec.mat.shininess, rng_state, dummy_pdf);
+    }
+
+    out_pdf = BRDFSamplingPdf(rec, Vo, wi, N, allow_diffuse);
+    return wi;
 }
 
 HYBRID_FUNC inline HitRecord intersectTriangle(const Ray& r,
@@ -192,6 +300,16 @@ HYBRID_FUNC inline void assignMaterialToHit(
     }
 }
 
+HYBRID_FUNC inline int binary_search_cdf(const float* cdf, int n, float u) {
+    int lo = 0;
+    int hi = n - 1;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (cdf[mid] < u) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
 
 HYBRID_FUNC inline Vec3 TraceRayIterative(
     const Ray& primaryRay,
@@ -206,14 +324,22 @@ HYBRID_FUNC inline Vec3 TraceRayIterative(
     const int numObjectMaterials,
     const Light* __restrict__ lights,
     const int numLights,
+    const EmissiveTriInfo* __restrict__ emissiveTris,
+    const float* __restrict__ emissiveCDF,
+    const int numEmissiveTris,
+    const float totalEmissiveArea,
     unsigned int rng_state = 42u,
-    bool diffuse_bounce = true)
+    bool diffuse_bounce = true,
+    int nee_mode = 2)
 {
     if (maxDepth <= 0) return make_vec3(0.0f, 0.0f, 0.0f);
 
     Ray ray = primaryRay;
     Vec3 radiance = make_vec3(0.0f, 0.0f, 0.0f);
     Vec3 throughput = make_vec3(1.0f, 1.0f, 1.0f);
+    float prev_pdf = 0.0f;
+    bool prev_delta = false;
+    Vec3 prev_N = make_vec3(0.0f, 0.0f, 0.0f);
 
     for (int depth = 0; depth < maxDepth; ++depth) {
         HitRecord hitRecord;
@@ -225,38 +351,189 @@ HYBRID_FUNC inline Vec3 TraceRayIterative(
 
         assignMaterialToHit(hitRecord, numTriangles, triObjectIds, objectMaterials, numObjectMaterials);
 
+        const Vec3 N = normalize(hitRecord.normal);
+        const Vec3 Ns = GetShadingNormal(hitRecord);
+        const Vec3 Vo = unit_vector(-ray.direction());
+
+        const Vec3 Le = hitRecord.mat.emission;
+        if (Le.x > 0.0f || Le.y > 0.0f || Le.z > 0.0f) {
+            if (depth == 0 || prev_delta) {
+                radiance = radiance + throughput * Le;
+            } else if (nee_mode == 1) {
+                radiance = radiance + throughput * Le;
+            } else if (nee_mode == 2 &&
+                       numEmissiveTris > 0 &&
+                       totalEmissiveArea > 1e-10f &&
+                       prev_pdf > 1e-6f) {
+                Vec3 hitGeomN = normalize(cross(
+                    triangles[hitRecord.triangleIdx].v1 - triangles[hitRecord.triangleIdx].v0,
+                    triangles[hitRecord.triangleIdx].v2 - triangles[hitRecord.triangleIdx].v0));
+                float cosLight = fabsf(dot(hitGeomN, -unit_vector(ray.direction())));
+                float dist2 = static_cast<float>(hitRecord.t * hitRecord.t);
+                float G = (dist2 > 1e-10f) ? (cosLight / dist2) : 0.0f;
+                float pdf_area_sa = (G > 1e-10f) ? (1.0f / totalEmissiveArea) / G : 0.0f;
+                float NdotWi_prev = fmaxf(dot(prev_N, unit_vector(ray.direction())), 0.0f);
+                float pdf_cos = NdotWi_prev * 0.31830988618f;
+                float pdf_nee = (pdf_area_sa + pdf_cos + prev_pdf) / 3.0f;
+
+                float p2_brdf = prev_pdf * prev_pdf;
+                float p2_nee = pdf_nee * pdf_nee;
+                float w_brdf = (p2_brdf + p2_nee > 0.0f)
+                             ? p2_brdf / (p2_brdf + p2_nee)
+                             : 0.0f;
+                radiance = radiance + throughput * Le * w_brdf;
+            }
+        }
+
         Vec3 direct = ShadeDirect(ray, hitRecord, lights, numLights,
                                   numTriangles, nodes, aabbs, triangles);
-
         radiance = radiance + throughput * direct;
 
-        const float kd = hitRecord.mat.kd;
-        const float kr = hitRecord.mat.kr;
-        const float total = kd + kr;
+        if (numEmissiveTris > 0 && totalEmissiveArea > 1e-10f && nee_mode != 1) {
+            int strategy = 0;
+            if (nee_mode != 0) {
+                const float strategy_u = rng_next(rng_state);
+                strategy = (strategy_u < 0.333333f) ? 0
+                         : (strategy_u < 0.666667f) ? 1 : 2;
+            }
 
-        if (total <= 0.0f) break;
+            Vec3 wi_nee = make_vec3(0.0f, 0.0f, 0.0f);
+            Vec3 Le_nee = make_vec3(0.0f, 0.0f, 0.0f);
+            float dist_nee = 0.0f;
+            float cosLight_nee = 0.0f;
+            float NdotL_nee = 0.0f;
+            bool nee_valid = false;
 
-        const Vec3 N = normalize(hitRecord.normal);
-        const float xi = rng_next(rng_state);
+            if (strategy == 0) {
+                const float u_sel = rng_next(rng_state);
+                const int eidx = binary_search_cdf(emissiveCDF, numEmissiveTris, u_sel);
+                const EmissiveTriInfo& emi = emissiveTris[eidx];
+                const Triangle& eTri = triangles[emi.triangleIdx];
 
-        if (diffuse_bounce && xi < kd / total) {
-            Vec3 diffuse_dir = random_on_hemisphere(N, rng_state);
-            ray = Ray(hitRecord.p + N * RT_EPS, diffuse_dir);
-            float NdotL = fmaxf(dot(N, diffuse_dir), 0.0f);
-            throughput = throughput * (hitRecord.mat.albedo * (2.0f * NdotL));
-        } else {
-            const Vec3 reflDir = reflect_dir(unit_vector(ray.direction()), N);
-            ray = Ray(hitRecord.p + N * RT_EPS, reflDir);
-            const Vec3 reflTint = hitRecord.mat.specularColor;
-            throughput = throughput * (kr * reflTint);
+                float u1 = rng_next(rng_state);
+                float u2 = rng_next(rng_state);
+                if (u1 + u2 > 1.0f) {
+                    u1 = 1.0f - u1;
+                    u2 = 1.0f - u2;
+                }
+
+                const Vec3 lightPoint = eTri.v0 * (1.0f - u1 - u2)
+                                      + eTri.v1 * u1
+                                      + eTri.v2 * u2;
+
+                Vec3 toLight = lightPoint - hitRecord.p;
+                const float r2 = dot(toLight, toLight);
+                if (r2 > 1e-10f) {
+                    const float r = sqrtf(r2);
+                    wi_nee = toLight * (1.0f / r);
+                    NdotL_nee = fmaxf(dot(Ns, wi_nee), 0.0f);
+                    cosLight_nee = fabsf(dot(emi.normal, -wi_nee));
+
+                    if (NdotL_nee > 0.0f && cosLight_nee > 0.0f) {
+                        Ray shadowRay(hitRecord.p + N * RT_EPS, wi_nee);
+                        HitRecord shadowHit{};
+                        shadowHit.hit = false;
+                        SearchBVH(numTriangles, shadowRay, nodes, aabbs, triangles, shadowHit);
+
+                        if (!shadowHit.hit || shadowHit.t >= r - RT_EPS) {
+                            Le_nee = emi.emission;
+                            dist_nee = r;
+                            nee_valid = true;
+                        }
+                    }
+                }
+            } else {
+                if (strategy == 1) {
+                    wi_nee = cosine_hemisphere_sample(Ns, rng_state);
+                } else {
+                    float dummy_pdf = 0.0f;
+                    wi_nee = SampleBRDF(hitRecord, Vo, Ns, rng_state, dummy_pdf, diffuse_bounce);
+                }
+
+                NdotL_nee = fmaxf(dot(Ns, wi_nee), 0.0f);
+                if (NdotL_nee > 0.0f) {
+                    Ray neeRay(hitRecord.p + N * RT_EPS, wi_nee);
+                    HitRecord neeHit{};
+                    neeHit.hit = false;
+                    SearchBVH(numTriangles, neeRay, nodes, aabbs, triangles, neeHit);
+
+                    if (neeHit.hit) {
+                        assignMaterialToHit(neeHit, numTriangles, triObjectIds, objectMaterials, numObjectMaterials);
+                        const Vec3 Le_hit = neeHit.mat.emission;
+                        if (Le_hit.x > 0.0f || Le_hit.y > 0.0f || Le_hit.z > 0.0f) {
+                            Vec3 geomN = normalize(cross(
+                                triangles[neeHit.triangleIdx].v1 - triangles[neeHit.triangleIdx].v0,
+                                triangles[neeHit.triangleIdx].v2 - triangles[neeHit.triangleIdx].v0));
+                            cosLight_nee = fabsf(dot(geomN, -wi_nee));
+                            dist_nee = static_cast<float>(neeHit.t);
+                            Le_nee = Le_hit;
+                            nee_valid = true;
+                        }
+                    }
+                }
+            }
+
+            if (nee_valid && dist_nee > 1e-6f && cosLight_nee > 1e-6f) {
+                const float r2 = dist_nee * dist_nee;
+                const float G = cosLight_nee / r2;
+                const float pdf_area_sa = (1.0f / totalEmissiveArea) / G;
+                const Vec3 f_nee = EvaluateBRDF(hitRecord, Vo, wi_nee, Ns);
+
+                if (nee_mode == 0) {
+                    if (pdf_area_sa > 1e-10f) {
+                        const Vec3 nee_contrib = Le_nee * f_nee * (NdotL_nee / pdf_area_sa);
+                        radiance = radiance + throughput * nee_contrib;
+                    }
+                } else {
+                    const float pdf_cos = NdotL_nee * 0.31830988618f;
+                    const float pdf_brdf = BRDFSamplingPdf(hitRecord, Vo, wi_nee, Ns, diffuse_bounce);
+                    const float pdf_combined = (pdf_area_sa + pdf_cos + pdf_brdf) / 3.0f;
+
+                    if (pdf_combined > 1e-10f) {
+                        const float p2_nee = pdf_combined * pdf_combined;
+                        const float p2_brdf = pdf_brdf * pdf_brdf;
+                        const float w_nee = (p2_nee + p2_brdf > 0.0f)
+                                          ? p2_nee / (p2_nee + p2_brdf)
+                                          : 0.0f;
+                        const Vec3 nee_contrib = Le_nee * f_nee
+                                               * (NdotL_nee / pdf_combined) * w_nee;
+                        radiance = radiance + throughput * nee_contrib;
+                    }
+                }
+            }
         }
 
-        if (throughput.x < 1e-4f && throughput.y < 1e-4f && throughput.z < 1e-4f) {
+        prev_N = Ns;
+
+        const float kd = hitRecord.mat.kd;
+        const float ks = hitRecord.mat.ks;
+        const float kr = hitRecord.mat.kr;
+        if (kd > 1e-6f || ks > 1e-6f) {
+            float pdf = 0.0f;
+            Vec3 wi = SampleBRDF(hitRecord, Vo, Ns, rng_state, pdf, diffuse_bounce);
+            if (pdf < 1e-6f || dot(wi, Ns) < 0.0f) break;
+            ray = Ray(hitRecord.p + N * RT_EPS, wi);
+            const float NdotWi = fmaxf(dot(Ns, wi), 0.0f);
+            const Vec3 f = EvaluateBRDF(hitRecord, Vo, wi, Ns);
+            throughput = throughput * (f * (NdotWi / pdf));
+            prev_pdf = pdf;
+            prev_delta = false;
+        } else if (kr > 1e-6f) {
+            const Vec3 reflDir = reflect_dir(unit_vector(ray.direction()), Ns);
+            ray = Ray(hitRecord.p + N * RT_EPS, reflDir);
+            throughput = throughput * (hitRecord.mat.specularColor * kr);
+            prev_pdf = 0.0f;
+            prev_delta = true;
+        } else {
             break;
         }
+
+        const float p_survive = fminf(path_luminance(throughput), 0.95f);
+        if (p_survive < 1e-4f || rng_next(rng_state) > p_survive) break;
+        throughput = throughput * (1.0f / p_survive);
     }
 
-    return clamp(radiance);
+    return radiance;
 }
 
 

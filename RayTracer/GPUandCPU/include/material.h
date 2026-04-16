@@ -52,6 +52,14 @@ struct MaterialData {
     TextureData* normal_map = nullptr;
 };
 
+// Precomputed info for each emissive triangle used by area-light sampling.
+struct EmissiveTriInfo {
+    int   triangleIdx = -1;
+    Vec3  emission = make_vec3(0.0f, 0.0f, 0.0f);
+    float area = 0.0f;
+    Vec3  normal = make_vec3(0.0f, 0.0f, 0.0f);
+};
+
 inline MaterialData ToMaterialData(const Material& m) {
     MaterialData out;
     out.albedo = m.albedo;
